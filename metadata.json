@@ -1,0 +1,9 @@
+{
+  "name": "Weather-Mood-Music",
+  "description": "Generates a song based on the weather near you.",
+  "requestFramePermissions": [
+    "geolocation",
+    "microphone"
+  ],
+  "prompt": ""
+}

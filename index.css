@@ -1,0 +1,10 @@
+html, body {
+  height: 100%;
+  margin: 0;
+}
+body {
+  font-family: 'Google Sans', sans-serif;
+  font-size: 14px;
+  overflow: hidden;
+  background-color: #111;
+}
