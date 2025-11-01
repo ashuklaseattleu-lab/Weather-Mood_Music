@@ -142,7 +142,8 @@ export class LiveMusicHelper extends EventTarget {
 
   public async play() {
     if (this.disconnectTimeoutId) {
-      clearTimeout(this.disconnectTimeoutId);
+      // Fix: Use window.clearTimeout to avoid type conflicts with Node.js's Timeout type.
+      window.clearTimeout(this.disconnectTimeoutId);
       this.disconnectTimeoutId = null;
     }
     this.setPlaybackState('loading');
@@ -163,13 +164,15 @@ export class LiveMusicHelper extends EventTarget {
     this.setPlaybackState('paused');
     
     if (this.disconnectTimeoutId) {
-      clearTimeout(this.disconnectTimeoutId);
+      // Fix: Use window.clearTimeout to avoid type conflicts with Node.js's Timeout type.
+      window.clearTimeout(this.disconnectTimeoutId);
     }
 
     this.outputNode.gain.cancelScheduledValues(this.audioContext.currentTime);
     this.outputNode.gain.linearRampToValueAtTime(0, this.audioContext.currentTime + 0.1);
     
-    this.disconnectTimeoutId = setTimeout(() => {
+    // Fix: Use window.setTimeout to get a number return type for the timeout ID.
+    this.disconnectTimeoutId = window.setTimeout(() => {
         if (this.playbackState === 'paused') {
             this.outputNode.disconnect();
         }

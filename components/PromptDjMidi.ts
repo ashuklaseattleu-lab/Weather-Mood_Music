@@ -16,6 +16,8 @@ import { LiveMusicHelper } from '../utils/LiveMusicHelper';
 type AppState = 'initial' | 'loading' | 'player' | 'error';
 type ViewMode = 'music' | 'conversation';
 type ConversationState = 'idle' | 'listening' | 'processing' | 'error';
+type LyricsState = 'idle' | 'loading' | 'generated';
+type SingingState = 'idle' | 'loading' | 'singing';
 
 
 const COLORS = ['#9900ff', '#5200ff', '#ff25f6', '#2af6de', '#ffdd28', '#3dffab', '#d8ff3e', '#d9b2ff'];
@@ -142,6 +144,7 @@ export class WeatherMusicApp extends LitElement {
       cursor: pointer;
     }
 
+    .lyrics-toggle,
     .conversation-toggle {
         background: rgba(255, 255, 255, 0.1);
         border: 2px solid rgba(255, 255, 255, 0.3);
@@ -154,10 +157,12 @@ export class WeatherMusicApp extends LitElement {
         justify-content: center;
         transition: all 0.2s ease;
     }
+    .lyrics-toggle:hover,
     .conversation-toggle:hover {
         background: rgba(255, 255, 255, 0.2);
         transform: scale(1.1);
     }
+    .lyrics-toggle svg,
     .conversation-toggle svg {
         width: 32px;
         height: 32px;
@@ -258,6 +263,85 @@ export class WeatherMusicApp extends LitElement {
         padding: 0.8rem 1.5rem;
         font-size: 1.2rem;
     }
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.75);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      backdrop-filter: blur(5px);
+    }
+    .modal-content {
+      background: rgba(34, 34, 34, 0.9);
+      padding: 2rem;
+      border-radius: 1rem;
+      width: 90%;
+      max-width: 600px;
+      max-height: 80vh;
+      position: relative;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+    .modal-content h2 {
+      margin: 0;
+      text-align: center;
+    }
+    .modal-close {
+      position: absolute;
+      top: 0.5rem;
+      right: 0.5rem;
+      background: transparent;
+      border: none;
+      color: white;
+      font-size: 2.5rem;
+      cursor: pointer;
+      line-height: 1;
+      padding: 0.5rem;
+      opacity: 0.7;
+    }
+    .modal-close:hover {
+      opacity: 1;
+    }
+    .lyrics-container {
+      width: 100%;
+      background: rgba(0,0,0,0.3);
+      padding: 1.5rem;
+      border-radius: 0.5rem;
+      overflow-y: auto;
+      min-height: 200px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    .lyrics-text {
+      white-space: pre-wrap;
+      font-family: 'Roboto Mono', monospace;
+      font-size: 1rem;
+      width: 100%;
+    }
+    .lyrics-container p {
+      margin-top: 1rem;
+    }
+    .modal-footer {
+        margin-top: 1rem;
+        display: flex;
+        justify-content: center;
+    }
+    .error-message {
+        color: #ff8a80;
+        margin-top: 1rem;
+        text-align: center;
+        font-size: 1rem;
+    }
   `;
 
   @state() private appState: AppState = 'initial';
@@ -270,6 +354,11 @@ export class WeatherMusicApp extends LitElement {
   @state() private conversationState: ConversationState = 'idle';
   @state() private transcript: TranscriptMessage[] = [];
   @state() private zipCode = '';
+  @state() private showLyricsModal = false;
+  @state() private lyricsState: LyricsState = 'idle';
+  @state() private lyrics = '';
+  @state() private singingState: SingingState = 'idle';
+  @state() private singingError = '';
 
   @query('.transcript') private transcriptEl!: HTMLDivElement;
 
@@ -287,6 +376,10 @@ export class WeatherMusicApp extends LitElement {
   private nextStartTime = 0;
   private currentInputTranscription = '';
   private currentOutputTranscription = '';
+
+  private singingAudioContext: AudioContext | null = null;
+  private singingAudioSource: AudioBufferSourceNode | null = null;
+
 
   constructor(ai: GoogleGenAI, liveMusicHelper: LiveMusicHelper) {
     super();
@@ -596,8 +689,10 @@ export class WeatherMusicApp extends LitElement {
         if (message.toolCall?.functionCalls) {
             for (const fc of message.toolCall.functionCalls) {
                 if (fc.name === 'searchNearbyPlaces') {
-                    this.transcript = [...this.transcript, { speaker: 'system', text: `Searching for ${fc.args.query}...` }];
-                    const result = await this.executeSearchNearbyPlaces(fc.args.query);
+                    // Fix: Explicitly convert tool call argument to string to prevent potential type errors.
+                    const query = String(fc.args.query);
+                    this.transcript = [...this.transcript, { speaker: 'system', text: `Searching for ${query}...` }];
+                    const result = await this.executeSearchNearbyPlaces(query);
                     const session = await this.sessionPromise;
                     session.sendToolResponse({
                         functionResponses: { id: fc.id, name: fc.name, response: { result: JSON.stringify(result) } },
@@ -665,6 +760,115 @@ export class WeatherMusicApp extends LitElement {
         return { summary: response.text, places: links };
     }
 
+    private async generateLyrics() {
+        if (this.lyricsState === 'loading') return;
+    
+        this.showLyricsModal = true;
+        this.lyricsState = 'loading';
+        this.lyrics = '';
+    
+        try {
+          const activePrompts = this.liveMusicHelper.activePrompts.map(p => p.text).join(', ');
+          const prompt = `The weather is "${this.weatherSummary}" in ${this.locationName}. The musical mood is described by the following prompts: "${activePrompts}".
+          Write song lyrics that fit this weather and mood.
+          The style must be a fusion of Hindi Rap and Bollywood Dance Music.
+          The lyrics should be in Hinglish (a mix of Hindi and English).
+          The lyrics should be creative and catchy.
+          Do not include song structure labels like [Chorus], [Verse], etc. Just provide the raw lyrics.`;
+    
+          const response = await this.ai.models.generateContent({
+            model: 'gemini-2.5-pro',
+            contents: prompt,
+          });
+    
+          this.lyrics = response.text;
+          this.lyricsState = 'generated';
+        } catch (error: any) {
+          console.error('Failed to generate lyrics', error);
+          this.lyrics = `Sorry, I was unable to write lyrics at this moment.\nError: ${error.message}`;
+          this.lyricsState = 'generated';
+        }
+    }
+
+    // --- Singing Methods ---
+
+    private async singLyrics() {
+        if (this.singingState !== 'idle' || !this.lyrics) return;
+    
+        this.singingState = 'loading';
+        this.singingError = '';
+    
+        // The instrumental music will continue to play.
+    
+        try {
+          const response = await this.ai.models.generateContent({
+            model: "gemini-2.5-flash-preview-tts",
+            contents: [{ parts: [{ text: this.lyrics }] }],
+            config: {
+              responseModalities: [Modality.AUDIO],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: { voiceName: 'Kore' },
+                },
+              },
+            },
+          });
+    
+          const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+          if (!base64Audio) {
+            throw new Error('No audio data received from API.');
+          }
+    
+          if (!this.singingAudioContext) {
+            this.singingAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+          }
+    
+          const audioBuffer = await decodeAudioData(decode(base64Audio), this.singingAudioContext, 24000, 1);
+          
+          this.singingAudioSource = this.singingAudioContext.createBufferSource();
+          this.singingAudioSource.buffer = audioBuffer;
+          this.singingAudioSource.connect(this.singingAudioContext.destination);
+          
+          this.singingAudioSource.onended = () => {
+            this.singingAudioSource = null;
+            this.singingState = 'idle';
+          };
+    
+          this.singingAudioSource.start();
+          this.singingState = 'singing';
+    
+        } catch (error: any) {
+          console.error('Failed to generate or play speech', error);
+          this.singingError = `Sorry, I couldn't sing that. ${error.message}`;
+          this.stopSinging();
+        }
+    }
+    
+    private stopSinging() {
+        if (this.singingAudioSource) {
+          this.singingAudioSource.onended = null;
+          this.singingAudioSource.stop();
+          this.singingAudioSource = null;
+        }
+        this.singingState = 'idle';
+    }
+    
+    private handleSingButtonClick() {
+        if (this.singingState === 'singing') {
+          this.stopSinging();
+        } else if (this.singingState === 'idle') {
+          this.singLyrics();
+        }
+    }
+    
+    private getSingButtonText() {
+        switch (this.singingState) {
+          case 'idle': return 'Sing Lyrics';
+          case 'loading': return 'Warming up...';
+          case 'singing': return 'Stop Singing';
+        }
+    }
+
 
   render() {
     const bgStyles = styleMap({
@@ -676,6 +880,7 @@ export class WeatherMusicApp extends LitElement {
         <div class="container">
             ${this.renderContent()}
         </div>
+        ${this.showLyricsModal ? this.renderLyricsModal() : ''}
     `;
   }
   
@@ -744,6 +949,9 @@ export class WeatherMusicApp extends LitElement {
             )}
         </div>
         <div class="controls-container">
+            <button class="lyrics-toggle" @click=${this.generateLyrics} title="Generate Lyrics">
+                ${this.renderLyricsIcon()}
+            </button>
             <play-pause-button 
                 .playbackState=${this.playbackState} 
                 @click=${this.playPause}
@@ -809,6 +1017,44 @@ export class WeatherMusicApp extends LitElement {
             <animate attributeName="opacity" from="1" to="0" dur="1s" repeatCount="indefinite"/>
         </circle>` : ''}
     </svg>`;
+  }
+
+  private renderLyricsIcon() {
+    return svg`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+        <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/>
+    </svg>`;
+  }
+
+  private renderLyricsModal() {
+    const closeModal = () => {
+      this.stopSinging();
+      this.showLyricsModal = false;
+    };
+    return html`
+        <div class="modal-overlay" @click=${closeModal}>
+            <div class="modal-content" @click=${(e: Event) => e.stopPropagation()}>
+                <button class="modal-close" @click=${closeModal} aria-label="Close lyrics">&times;</button>
+                <h2>Your Weather Soundtrack Lyrics</h2>
+                <div class="lyrics-container">
+                    ${this.lyricsState === 'loading' ?
+                        html`<div class="loader"></div><p>Writing your song...</p>` :
+                        html`<div class="lyrics-text">${this.lyrics}</div>`
+                    }
+                </div>
+                ${this.lyricsState === 'generated' && this.lyrics ? html`
+                    <div class="modal-footer">
+                        <button
+                            class="primary"
+                            @click=${this.handleSingButtonClick}
+                            ?disabled=${this.singingState === 'loading'}>
+                            ${this.getSingButtonText()}
+                        </button>
+                    </div>
+                ` : ''}
+                ${this.singingError ? html`<p class="error-message">${this.singingError}</p>` : ''}
+            </div>
+        </div>
+    `;
   }
 }
 
